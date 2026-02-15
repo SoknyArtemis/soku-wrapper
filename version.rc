@@ -1,0 +1,26 @@
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS 0x4
+FILETYPE 0x1
+{
+  BLOCK "StringFileInfo"
+  {
+    BLOCK "040904B0"
+    {
+      VALUE "CompanyName", "Sokny Artemis"
+      VALUE "FileDescription", "Soku Swarm Syncer"
+      VALUE "FileVersion", "0.1"
+      VALUE "LegalCopyright", "Copyright (C) 2026 Sokny Artemis"
+      VALUE "ProductName", "Soku Swarm Syncer"
+      VALUE "ProductVersion", "v0.1"
+      VALUE "OriginalFilename", "soku-swarm-syncer.exe"
+      VALUE "InternalName", "soku-swarm-syncer"
+    }
+  }
+  
+  BLOCK "VarFileInfo"
+  {
+    VALUE "Translation", 0x0409, 1200
+  }
+}
