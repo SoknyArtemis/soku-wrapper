@@ -1,4 +1,4 @@
-# Soku Wrapper
+# Soku Swarm Syncer
 
 一个在你关则的时候帮你把 Swarm 同步关掉的工具。
 
