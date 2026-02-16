@@ -7,36 +7,30 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Arc;
+use std::thread;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, MB_OK, MB_ICONWARNING, MB_SYSTEMMODAL
-};
 
 fn main() {
-    // 初始化应用上下文
+    // 极速启动：最大化并行化，最小化内存分配
     let app_context = ApplicationContext::new();
-
-    // 检查游戏目录和文件是否存在
-    if !app_context.validate_game_paths() {
-        return;
-    }
 
     // 创建作业对象用于进程管理
     let job_object = Arc::new(JobObjectManager::new());
 
-    // 启动辅助工具
+    // 快速启动辅助工具（非阻塞）
     app_context.launch_helper_tools(&job_object);
 
-    // 启动游戏并等待其结束
-    app_context.run_game();
+    // 立即启动游戏，不进行完整验证
+    app_context.run_game_with_job_object(job_object);
 }
 
+#[derive(Clone)]
 struct ApplicationContext {
     base_dir: PathBuf,
     th123_dir: PathBuf,
@@ -64,61 +58,69 @@ impl ApplicationContext {
         }
     }
 
-    fn validate_game_paths(&self) -> bool {
-        // 使用更高效的方式一次性检查所有必需文件
-        let required_paths = [
-            (&self.th123_dir, "游戏目录"),
-            (&self.game_path, "游戏文件"),
-            (&self.swarm_path, "Swarm 工具"),
-            (&self.tsk_path, "TSK 工具"),
-        ];
-
-        for (path, desc) in &required_paths {
-            if !path.exists() {
-                show_warning_message(&format!("未找到{}: {}", desc, path.display()));
-                return false;
-            }
-        }
-
-        true
-    }
 
     fn launch_helper_tools(&self, job_object: &Arc<JobObjectManager>) {
         const DETACHED_PROCESS: u32 = 0x00000008;
         const CREATE_NO_WINDOW: u32 = 0x00000200;
 
-        // 使用预计算的基础目录
+        // 使用引用避免不必要的拷贝，只在需要时克隆
         let base_dir = &self.base_dir;
+        let swarm_path = &self.swarm_path;
+        let tsk_path = &self.tsk_path;
+        let job_obj = job_object.clone(); // 只克隆Arc指针，不是整个对象
 
-        // 定义要启动的工具列表
-        let tools = [&self.swarm_path, &self.tsk_path];
-
-        // 遍历并启动所有存在的工具
-        for tool_path in &tools {
-            if tool_path.exists() {
-                if let Ok(child) = Command::new(tool_path)
-                    .current_dir(base_dir)
+        // 并行启动辅助工具以提高效率，使用更少的内存拷贝
+        // 为每个线程只传递必要的数据
+        if swarm_path.exists() {
+            let job_obj_swarm = job_obj.clone();
+            let base_dir_swarm = base_dir.clone();
+            let swarm_path = swarm_path.clone();
+            
+            thread::spawn(move || {
+                if let Ok(child) = Command::new(&swarm_path)
+                    .current_dir(&base_dir_swarm)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
                     .spawn()
                 {
-                    job_object.assign_process(child.as_raw_handle() as HANDLE);
+                    job_obj_swarm.assign_process(child.as_raw_handle() as HANDLE);
                 }
-            }
+            });
+        }
+
+        if tsk_path.exists() {
+            let job_obj_tsk = job_obj.clone();
+            let base_dir_tsk = base_dir.clone();
+            let tsk_path = tsk_path.clone();
+            
+            thread::spawn(move || {
+                if let Ok(child) = Command::new(&tsk_path)
+                    .current_dir(&base_dir_tsk)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+                    .spawn()
+                {
+                    job_obj_tsk.assign_process(child.as_raw_handle() as HANDLE);
+                }
+            });
         }
     }
     
 
-    fn run_game(&self) {
-        // 使用更高效的进程启动方式
-        // 启动游戏后等待游戏结束，以便作业对象能够管理工作进程
+    fn run_game_with_job_object(self, job_object: Arc<JobObjectManager>) {
+        // 启动游戏并将其添加到作业对象中
         if let Ok(mut game_proc) = Command::new(&self.game_path)
             .current_dir(&self.th123_dir)
             .spawn()
         {
-            // 等待游戏进程结束，这样作业对象才能在游戏结束后继续存在一段时间以管理工作进程
+            // 将游戏进程也添加到作业对象中
+            job_object.assign_process(game_proc.as_raw_handle() as HANDLE);
+            
+            // 等待游戏进程结束
             let _ = game_proc.wait();
         }
     }
@@ -127,6 +129,15 @@ impl ApplicationContext {
 // 使 JobObjectManager 线程安全
 unsafe impl Send for JobObjectManager {}
 unsafe impl Sync for JobObjectManager {}
+
+// 为 JobObjectManager 实现 Clone，以便在线程间共享
+impl Clone for JobObjectManager {
+    fn clone(&self) -> Self {
+        JobObjectManager {
+            handle: self.handle,
+        }
+    }
+}
 
 struct JobObjectManager {
     handle: HANDLE,
@@ -175,18 +186,3 @@ impl Drop for JobObjectManager {
     }
 }
 
-// 显示警告消息框的函数
-fn show_warning_message(message: &str) {
-    unsafe {
-        // 将字符串转换为宽字符
-        let wide_msg: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-        let wide_title: Vec<u16> = "警告".encode_utf16().chain(std::iter::once(0)).collect();
-        
-        MessageBoxW(
-            0 as HWND,
-            wide_msg.as_ptr(),
-            wide_title.as_ptr(),
-            MB_OK | MB_ICONWARNING | MB_SYSTEMMODAL
-        );
-    }
-}
